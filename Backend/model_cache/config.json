@@ -1,0 +1,10 @@
+{
+  "vocab_size": 16384,
+  "block_size": 256,
+  "n_embd": 512,
+  "n_head": 8,
+  "n_layer": 10,
+  "dropout": 0.1,
+  "bias": true,
+  "model_type": "vital_slm"
+}
