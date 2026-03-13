@@ -1,15 +1,30 @@
 import os
+import json
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from model import load_tokenizer, load_model, generate_medical_response
 from groq import Groq
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 tokenizer = load_tokenizer()
 model = load_model()
 
-groq_client = Groq(api_key="YOUR_GROQ_API")
+groq_api_key = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 SYSTEM_PROMPT = """You are VitalLM, a professional and empathetic AI medical assistant.
 
@@ -34,7 +49,30 @@ Rules:
 - Always recommend consulting a doctor for serious concerns"""
 
 
+def format_sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def build_prompt(message: str) -> str:
+    cleaned = message.strip()
+    if not cleaned.lower().startswith("patient:"):
+        cleaned = f"Patient: {cleaned} Doctor:"
+    return cleaned
+
+
+def stream_text_chunks(text: str, chunk_size: int = 18):
+    words = text.split()
+    for index in range(0, len(words), chunk_size):
+        piece = " ".join(words[index:index + chunk_size]).strip()
+        if piece:
+            suffix = " " if index + chunk_size < len(words) else ""
+            yield piece + suffix
+
+
 def polish_with_groq(raw_response: str, original_prompt: str) -> str:
+    if groq_client is None:
+        return raw_response
+
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -72,7 +110,8 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": "VitalLM-50M + Groq LLaMA-3.3-70B"}
+    provider = "VitalLM-50M + Groq LLaMA-3.3-70B" if groq_client else "VitalLM-50M"
+    return {"status": "ok", "model": provider}
 
 
 @app.post("/chat")
@@ -84,9 +123,7 @@ def chat(prompt: Prompt):
         raise HTTPException(status_code=400, detail="Message too long. Max 1000 characters.")
 
     # Format prompt if not already in Patient/Doctor format
-    message = prompt.message.strip()
-    if not message.lower().startswith("patient:"):
-        message = f"Patient: {message} Doctor:"
+    message = build_prompt(prompt.message)
 
     # Step 1: Local SLM generates raw medical draft
     raw = generate_medical_response(model, tokenizer, message)
@@ -99,3 +136,72 @@ def chat(prompt: Prompt):
         "raw_response": raw,
         "groq_response": final
     }
+
+
+@app.post("/chat/stream")
+def chat_stream(prompt: Prompt):
+    if not prompt.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    if len(prompt.message) > 1000:
+        raise HTTPException(status_code=400, detail="Message too long. Max 1000 characters.")
+
+    message = build_prompt(prompt.message)
+
+    def event_generator():
+        raw = generate_medical_response(model, tokenizer, message)
+        streamed_parts = []
+
+        yield format_sse({"type": "status", "content": "Generating response..."})
+
+        if groq_client is not None:
+            try:
+                stream = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f"""Patient message:
+{prompt.message}
+
+Raw draft response to use as medical reference:
+{raw}
+
+Write a clean, professional doctor's response to the patient."""}
+                    ],
+                    temperature=0.4,
+                    max_tokens=400,
+                    top_p=0.9,
+                    frequency_penalty=0.3,
+                    presence_penalty=0.2,
+                    stream=True,
+                )
+
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        streamed_parts.append(delta)
+                        yield format_sse({"type": "chunk", "content": delta})
+
+                final = "".join(streamed_parts).strip() or raw
+                yield format_sse({
+                    "type": "done",
+                    "content": final,
+                    "raw_response": raw,
+                })
+                return
+
+            except Exception:
+                streamed_parts.clear()
+
+        final = raw
+        for piece in stream_text_chunks(final):
+            streamed_parts.append(piece)
+            yield format_sse({"type": "chunk", "content": piece})
+
+        yield format_sse({
+            "type": "done",
+            "content": final,
+            "raw_response": raw,
+        })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

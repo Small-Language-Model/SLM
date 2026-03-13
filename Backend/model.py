@@ -189,10 +189,16 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s([.,!?;:\'\)])', r'\1', text)
     text = re.sub(r'([\(])\s', r'\1', text)
     text = re.sub(r'\s*<\|endoftext\|>.*', '', text, flags=re.DOTALL)
-    # Cut off at second "Doctor:" to avoid model rambling into new conversations
-    parts = re.split(r'(?i)doctor\s*:', text)
-    if len(parts) >= 3:
-        text = parts[0] + "Doctor:" + parts[1]
+
+    # Keep only the generated doctor reply when the model echoes the full prompt.
+    parts = re.split(r'(?i)doctor\s*:', text, maxsplit=2)
+    if len(parts) >= 2:
+        text = parts[1]
+
+    # Cut off if the model starts another patient/doctor turn.
+    text = re.split(r'(?i)patient\s*:', text, maxsplit=1)[0]
+    text = re.split(r'(?i)doctor\s*:', text, maxsplit=1)[0]
+
     return text.strip()
 
 def generate_medical_response(model, tokenizer, prompt,
