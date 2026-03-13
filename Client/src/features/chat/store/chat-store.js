@@ -120,6 +120,12 @@ export const useChatStore = create((set) => ({
           if (payload.type === 'done') {
             finalMessage = payload.content || finalMessage
 
+            console.log({
+              prompt: message,
+              raw_response: payload.raw_response ?? '',
+              groq_response: finalMessage,
+            })
+
             set((state) => ({
               messages: state.messages.map((entry) =>
                 entry.id === assistantMessageId
