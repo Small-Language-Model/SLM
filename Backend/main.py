@@ -23,7 +23,7 @@ app.add_middleware(
 tokenizer = load_tokenizer()
 model = load_model()
 
-groq_api_key = os.getenv("GROQ_API_KEY") or "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"
+groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 SYSTEM_PROMPT = """You are VitalLM, a professional and empathetic AI medical assistant.
